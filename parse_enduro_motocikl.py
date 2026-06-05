@@ -32,6 +32,7 @@ IGNORED_LINK_TEXTS = {"купить", "подробнее", "в корзину",
 IGNORED_LINK_WORDS = {"главная", "каталог", "кредит", "контакты"}
 PRODUCT_MARKERS = (
     "enduro",
+    "эндуро",
     "ataki",
     "apollo",
     "avantis",
@@ -50,6 +51,31 @@ PRODUCT_MARKERS = (
     "sprmotors",
     "storm",
     "zontes",
+)
+SPEC_LABELS = (
+    "Тип ТС",
+    "Бренд",
+    "Наличие ЭПТС",
+    "Двигатель",
+    "Объем двигателя, см3",
+    "Объём двигателя, см3",
+    "Мощность двигателя, л.с.",
+    "Мощность",
+    "Коробка передач",
+    "КПП",
+    "Трансмиссия",
+    "Охлаждение",
+    "Стартер",
+    "Привод",
+    "Передняя подвеска",
+    "Задняя подвеска",
+    "Передний тормоз",
+    "Задний тормоз",
+    "Колеса",
+    "Колёса",
+    "Вес",
+    "Высота по седлу",
+    "Гарантия",
 )
 
 
@@ -93,6 +119,83 @@ class LinkParser(HTMLParser):
         if isinstance(href, str) and isinstance(text_parts, list):
             text = normalize_space(" ".join(str(part) for part in text_parts))
             self.links.append((href, text))
+
+
+class CatalogCardParser(HTMLParser):
+    """Собирает текст карточек каталога даже если внутри нет товарной ссылки."""
+
+    CARD_CLASS_RE = re.compile(r"(?:catalog|product|item|card|tile)", re.I)
+    VOID_TAGS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cards: list[dict[str, str]] = []
+        self._open_cards: list[dict[str, object]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        is_void_tag = tag.lower() in self.VOID_TAGS
+        if not is_void_tag:
+            for card in self._open_cards:
+                card["depth"] = int(card["depth"]) + 1
+
+        class_name = attrs_dict.get("class", "") or ""
+        if tag.lower() in {"article", "div", "li"} and self.CARD_CLASS_RE.search(class_name):
+            self._open_cards.append({"depth": 1, "text": [], "url": "", "image": ""})
+
+        for card in self._open_cards:
+            if tag.lower() == "a" and not card.get("url"):
+                href = attrs_dict.get("href") or ""
+                if "/katalog/" in href:
+                    card["url"] = href
+            if tag.lower() == "img" and not card.get("image"):
+                image = attrs_dict.get("src") or attrs_dict.get("data-src") or ""
+                card["image"] = image
+
+    def handle_data(self, data: str) -> None:
+        for card in self._open_cards:
+            text = card.get("text")
+            if isinstance(text, list):
+                text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        closed: list[dict[str, object]] = []
+        still_open: list[dict[str, object]] = []
+        for card in self._open_cards:
+            card["depth"] = int(card["depth"]) - 1
+            if int(card["depth"]) <= 0:
+                closed.append(card)
+            else:
+                still_open.append(card)
+        self._open_cards = still_open
+
+        for card in closed:
+            text_parts = card.get("text")
+            if not isinstance(text_parts, list):
+                continue
+            text = normalize_space(" ".join(str(part) for part in text_parts))
+            if text:
+                self.cards.append(
+                    {
+                        "text": text,
+                        "url": str(card.get("url") or ""),
+                        "image": str(card.get("image") or ""),
+                    }
+                )
 
 
 def normalize_space(value: str) -> str:
@@ -233,6 +336,99 @@ def product_name_from_link_text(text: str) -> str:
     return cleaned
 
 
+def first_spec_position(text: str) -> int:
+    """Найти позицию первой характеристики в тексте карточки."""
+    positions = [text.find(label) for label in SPEC_LABELS if text.find(label) >= 0]
+    return min(positions) if positions else -1
+
+
+def parse_specs_from_text(text: str) -> dict[str, dict[str, str]]:
+    """Разобрать характеристики из плоского текста карточки каталога."""
+    specs: dict[str, dict[str, str]] = {}
+    matches = list(
+        re.finditer(
+            "|".join(
+                rf"\b{re.escape(label)}\b"
+                for label in sorted(SPEC_LABELS, key=len, reverse=True)
+            ),
+            text,
+            flags=re.I,
+        )
+    )
+    for index, match in enumerate(matches):
+        key = normalize_space(match.group(0))
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        value = normalize_space(text[value_start:value_end])
+        value = re.split(r"\s+(?:Купить|В корзину|Сравнить|Избранное)\b", value, maxsplit=1)[0]
+        value = re.split(r"\s+\d[\d\s.,]*\s*(?:руб\.?|BYN)\b", value, maxsplit=1, flags=re.I)[0]
+        if value and len(value) <= 160:
+            specs.setdefault("Характеристики", {})[key] = value
+    return specs
+
+
+def looks_like_catalog_card_text(text: str) -> bool:
+    """Проверить, похож ли плоский текст на карточку мотоцикла."""
+    lower_text = text.lower()
+    has_product_marker = any(marker in lower_text for marker in PRODUCT_MARKERS)
+    has_specs = any(label.lower() in lower_text for label in SPEC_LABELS)
+    return has_product_marker and has_specs
+
+
+def product_from_catalog_card(card: dict[str, str], base_url: str) -> Motorcycle | None:
+    """Создать товар из HTML-блока каталога без перехода в карточку товара."""
+    text = normalize_space(card.get("text", ""))
+    if not looks_like_catalog_card_text(text):
+        return None
+
+    spec_position = first_spec_position(text)
+    name_source = text[:spec_position] if spec_position > 0 else text
+    name = product_name_from_link_text(name_source)
+    if not name or len(name) < 3:
+        return None
+
+    price = first_match([r"([0-9][0-9\s.,]{1,20}\s*(?:BYN|руб\.?|р\.))"], text)
+    product_url = urljoin(base_url, card.get("url", "")) if card.get("url") else ""
+    image = urljoin(base_url, card.get("image", "")) if card.get("image") else ""
+    return Motorcycle(
+        name=name,
+        price=price,
+        url=product_url,
+        image=image,
+        categories=parse_specs_from_text(text),
+    )
+
+
+def catalog_block_products(page_html: str, base_url: str, limit: int) -> list[Motorcycle]:
+    """Fallback: достать товары прямо из HTML-блоков каталога без ссылок."""
+    parser = CatalogCardParser()
+    parser.feed(page_html)
+
+    # Сначала берем самые маленькие подходящие блоки: большие контейнеры Bitrix
+    # часто содержат сразу все товары, а маленькие блоки обычно являются карточками.
+    indexed_cards = sorted(
+        enumerate(parser.cards),
+        key=lambda item: len(item[1].get("text", "")),
+    )
+    indexed_products: list[tuple[int, Motorcycle]] = []
+    for card_index, card in indexed_cards:
+        product = product_from_catalog_card(card, base_url)
+        if product is None:
+            continue
+        indexed_products.append((card_index, product))
+        products_for_limit = dedupe_products(product for _, product in indexed_products)
+        if len(products_for_limit) >= limit:
+            break
+
+    indexed_products.sort(key=lambda item: item[0])
+    products = dedupe_products(product for _, product in indexed_products)
+    if products:
+        return products[:limit]
+
+    whole_page_product = product_from_catalog_card({"text": strip_tags(page_html)}, base_url)
+    return [whole_page_product] if whole_page_product is not None else []
+
+
 def dedupe_products(products: Iterable[Motorcycle]) -> list[Motorcycle]:
     """Убрать дубли, сохранив порядок."""
     seen: set[str] = set()
@@ -246,7 +442,7 @@ def dedupe_products(products: Iterable[Motorcycle]) -> list[Motorcycle]:
 
 
 def catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcycle]:
-    """Найти первые товарные ссылки на странице каталога."""
+    """Найти первые товары на странице каталога."""
     products = [product for product in jsonld_products(page_html, base_url) if product.url]
     if len(products) >= limit:
         return dedupe_products(products)[:limit]
@@ -261,7 +457,14 @@ def catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcyc
             )
         )
 
-    return dedupe_products(products)[:limit]
+    products = dedupe_products(products)
+    if products:
+        return products[:limit]
+
+    # На motocikl.by карточки каталога могут содержать все данные прямо в HTML,
+    # но не иметь нормальных ссылок на отдельные страницы.  Поэтому, если ссылки
+    # не нашлись, парсим сами HTML-блоки каталога.
+    return catalog_block_products(page_html, base_url, limit)
 
 
 def first_match(patterns: Iterable[str], page_html: str) -> str:
@@ -379,6 +582,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pause", type=float, default=1.0, help="Pause between product pages")
     parser.add_argument(
         "--debug-html",
+        nargs="?",
+        const="catalog.html",
         help="Save the downloaded catalog HTML to this file for troubleshooting",
     )
     return parser.parse_args()
@@ -395,7 +600,7 @@ def main() -> int:
     products = catalog_products(catalog_html, args.url, args.limit)
     if not products:
         print(
-            "No product links were found on the catalog page. "
+            "No products were found on the catalog page. "
             "Run again with --debug-html catalog.html and send that file for inspection.",
             file=sys.stderr,
         )
@@ -403,6 +608,15 @@ def main() -> int:
 
     parsed: list[Motorcycle] = []
     for number, product in enumerate(products, start=1):
+        if product.categories:
+            print(f"[{number}/{len(products)}] {product.name} (parsed from catalog HTML)")
+            parsed.append(product)
+            continue
+        if not product.url:
+            print(f"[{number}/{len(products)}] {product.name} (no detail URL)")
+            parsed.append(product)
+            continue
+
         print(f"[{number}/{len(products)}] {product.url}")
         detail_html = fetch(product.url)
         parsed.append(parse_detail(product, detail_html))
