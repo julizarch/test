@@ -16,7 +16,8 @@ python3 parse_enduro_motocikl.py
 python3 parse_enduro_motocikl.py \
   --url "https://motocikl.by/katalog/vse_tovary/mototsikly/enduro/" \
   --limit 5 \
-  --output enduro_motocikl.csv
+  --output enduro_motocikl.csv \
+  --debug-html catalog.html
 ```
 
 - `--url` — страница каталога.
@@ -36,6 +37,23 @@ python3 parse_enduro_motocikl.py --debug-html catalog.html
 ```
 
 После этого можно отправить файл `catalog.html` разработчику — в нем будет именно та HTML-верстка, которую получил скрипт.
+
+## Как решить конфликт в Pull Request
+
+Если GitHub показывает конфликт с маркерами `<<<<<<<`, `=======`, `>>>>>>>` в `parse_enduro_motocikl.py`, оставьте вариант из ветки `codex/parse-first-5-enduro-motorcycles-data-zezdic`, а старый вариант из `main` удалите. В рабочем файле не должно остаться строк с этими маркерами.
+
+Коротко, в конфликте нужно выбрать:
+
+- стековый `LinkParser`, который собирает текст из всей карточки товара;
+- функции `html_links`, `looks_like_product_link`, `product_name_from_link_text`;
+- новую версию `catalog_products`, которая ищет товарные ссылки по `/katalog/`, а не только строго внутри `/enduro/`;
+- параметр `--debug-html` и сохранение HTML в `main()`.
+
+После ручного удаления маркеров проверьте файл командой:
+
+```bash
+python3 -m py_compile parse_enduro_motocikl.py
+```
 
 ## Как данные разбиваются по категориям
 

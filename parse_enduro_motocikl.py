@@ -227,23 +227,6 @@ def product_name_from_link_text(text: str) -> str:
     return cleaned
 
 
-def fallback_catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcycle]:
-    """Parse products directly from catalog cards when detail links are unusual."""
-    products: list[Motorcycle] = []
-    for href, text in html_links(page_html):
-        if not looks_like_product_link(href, text, base_url):
-            continue
-        products.append(
-            Motorcycle(
-                name=product_name_from_link_text(text),
-                url=urljoin(base_url, href).split("#", 1)[0],
-            )
-        )
-        if len(dedupe_products(products)) >= limit:
-            break
-    return dedupe_products(products)[:limit]
-
-
 def catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcycle]:
     """Find product URLs on the category page and keep the first unique ones."""
     products = [item for item in jsonld_products(page_html, base_url) if item.url]
