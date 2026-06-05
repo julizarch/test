@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Parse the first 5 enduro motorcycles from motocikl.by and save them to CSV.
+"""Скачать первые эндуро-мотоциклы с motocikl.by и сохранить их в CSV.
 
-The script is intentionally dependency-free: it uses only the Python standard
-library, so it can be copied to a server and run without installing packages.
+Скрипт использует только стандартную библиотеку Python, поэтому для запуска не
+нужно устанавливать дополнительные пакеты.
 """
 
 from __future__ import annotations
@@ -27,11 +27,35 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0 Safari/537.36"
 )
+BASE_FIELDS = ["Название", "Цена", "Ссылка", "Изображение"]
+IGNORED_LINK_TEXTS = {"купить", "подробнее", "в корзину", "сравнить", "избранное"}
+IGNORED_LINK_WORDS = {"главная", "каталог", "кредит", "контакты"}
+PRODUCT_MARKERS = (
+    "enduro",
+    "ataki",
+    "apollo",
+    "avantis",
+    "gr",
+    "kayo",
+    "kews",
+    "lifan",
+    "minsk",
+    "motoland",
+    "nfx",
+    "nine fox",
+    "racer",
+    "ram",
+    "regulmoto",
+    "rockot",
+    "sprmotors",
+    "storm",
+    "zontes",
+)
 
 
 @dataclass
 class Motorcycle:
-    """One parsed motorcycle with grouped specifications."""
+    """Одна карточка мотоцикла и ее характеристики."""
 
     name: str = ""
     price: str = ""
@@ -41,54 +65,55 @@ class Motorcycle:
 
 
 class LinkParser(HTMLParser):
-    """Collect links with their visible text from an HTML document.
-
-    Some Bitrix catalog templates put badges, images and titles into one large
-    clickable block.  We therefore collect text for every open ``<a>`` tag
-    instead of keeping only the last link encountered by the parser.
-    """
+    """Собирает ссылки и весь видимый текст внутри каждой ссылки."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.links: list[tuple[str, str]] = []
-        self._stack: list[dict[str, object]] = []
+        self._current: list[dict[str, object]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() == "a":
-            attr_map = dict(attrs)
-            self._stack.append({"href": attr_map.get("href"), "text": []})
+            attrs_dict = dict(attrs)
+            self._current.append({"href": attrs_dict.get("href"), "text": []})
 
     def handle_data(self, data: str) -> None:
-        for link in self._stack:
-            text = link["text"]
+        for item in self._current:
+            text = item.get("text")
             if isinstance(text, list):
                 text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or not self._stack:
+        if tag.lower() != "a" or not self._current:
             return
 
-        link = self._stack.pop()
-        href = link.get("href")
-        text_parts = link.get("text")
+        item = self._current.pop()
+        href = item.get("href")
+        text_parts = item.get("text")
         if isinstance(href, str) and isinstance(text_parts, list):
             text = normalize_space(" ".join(str(part) for part in text_parts))
             self.links.append((href, text))
 
 
 def normalize_space(value: str) -> str:
+    """Заменить повторяющиеся пробелы/переносы строк одним пробелом."""
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
 
 
 def strip_tags(fragment: str) -> str:
+    """Убрать HTML-теги из фрагмента."""
     fragment = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", fragment)
     fragment = re.sub(r"(?s)<.*?>", " ", fragment)
     return normalize_space(fragment)
 
 
 def fetch(url: str, timeout: int = 30, retries: int = 2, pause: float = 1.0) -> str:
-    """Download a page and return decoded HTML."""
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"}
+    """Скачать страницу и вернуть HTML."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "ru,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
     last_error: Exception | None = None
 
     for attempt in range(retries + 1):
@@ -105,8 +130,19 @@ def fetch(url: str, timeout: int = 30, retries: int = 2, pause: float = 1.0) -> 
     raise RuntimeError(f"Cannot download {url}: {last_error}")
 
 
+def iter_jsonld_objects(value: object) -> Iterable[dict]:
+    """Рекурсивно пройти JSON-LD и вернуть все словари."""
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from iter_jsonld_objects(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from iter_jsonld_objects(nested)
+
+
 def jsonld_products(page_html: str, base_url: str) -> list[Motorcycle]:
-    """Extract products from JSON-LD blocks when the site provides them."""
+    """Достать товары из JSON-LD, если сайт их отдает."""
     products: list[Motorcycle] = []
     blocks = re.findall(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -114,26 +150,21 @@ def jsonld_products(page_html: str, base_url: str) -> list[Motorcycle]:
         flags=re.I | re.S,
     )
 
-    def walk(obj: object) -> Iterable[dict]:
-        if isinstance(obj, dict):
-            if str(obj.get("@type", "")).lower() == "product":
-                yield obj
-            for value in obj.values():
-                yield from walk(value)
-        elif isinstance(obj, list):
-            for item in obj:
-                yield from walk(item)
-
     for raw in blocks:
         try:
             data = json.loads(html.unescape(raw))
         except json.JSONDecodeError:
             continue
-        for product in walk(data):
+
+        for product in iter_jsonld_objects(data):
+            if str(product.get("@type", "")).lower() != "product":
+                continue
+
             offers = product.get("offers") if isinstance(product.get("offers"), dict) else {}
             image = product.get("image", "")
             if isinstance(image, list):
                 image = image[0] if image else ""
+
             products.append(
                 Motorcycle(
                     name=normalize_space(str(product.get("name", ""))),
@@ -142,15 +173,12 @@ def jsonld_products(page_html: str, base_url: str) -> list[Motorcycle]:
                     image=urljoin(base_url, str(image)) if image else "",
                 )
             )
+
     return products
 
 
 def html_links(page_html: str) -> list[tuple[str, str]]:
-    """Return links using both HTMLParser and a regex fallback.
-
-    The regex fallback helps with malformed templates where HTMLParser may miss
-    an anchor because of invalid nesting or unclosed tags.
-    """
+    """Вернуть ссылки из HTML через HTMLParser и запасной regex-поиск."""
     parser = LinkParser()
     parser.feed(page_html)
     links = parser.links[:]
@@ -166,56 +194,34 @@ def html_links(page_html: str) -> list[tuple[str, str]]:
 
 
 def looks_like_product_link(href: str, text: str, base_url: str) -> bool:
-    """Detect product links without relying on one exact URL layout."""
-    normalized_text = normalize_space(text)
-    lower_text = normalized_text.lower()
+    """Проверить, похожа ли ссылка на товарную карточку."""
+    clean_text = normalize_space(text)
+    lower_text = clean_text.lower()
     parsed_base = urlparse(base_url)
-    parsed = urlparse(urljoin(base_url, href))
+    parsed_url = urlparse(urljoin(base_url, href))
     base_path = parsed_base.path.rstrip("/")
-    path = parsed.path.rstrip("/")
+    path = parsed_url.path.rstrip("/")
 
-    if parsed.netloc != parsed_base.netloc:
+    if parsed_url.netloc != parsed_base.netloc:
         return False
     if not path or path == base_path:
         return False
     if not path.startswith("/katalog/"):
         return False
-    if lower_text in {"купить", "подробнее", "в корзину", "сравнить", "избранное"}:
+    if lower_text in IGNORED_LINK_TEXTS:
         return False
-    if any(word in lower_text for word in ("главная", "каталог", "кредит", "контакты")):
+    if any(word in lower_text for word in IGNORED_LINK_WORDS):
         return False
     if re.fullmatch(r"[0-9\s.,]+(?:руб\.?|byn)?", lower_text):
         return False
 
-    product_markers = (
-        "enduro",
-        "ataki",
-        "apollo",
-        "avantis",
-        "gr",
-        "kayo",
-        "kews",
-        "lifan",
-        "minsk",
-        "motoland",
-        "nfx",
-        "nine fox",
-        "racer",
-        "ram",
-        "regulmoto",
-        "rockot",
-        "sprmotors",
-        "storm",
-        "zontes",
-    )
-    has_model_number = bool(re.search(r"\d", normalized_text))
-    has_product_marker = any(marker in lower_text for marker in product_markers)
-
-    return (has_model_number or has_product_marker) and len(normalized_text) >= 5
+    has_model_number = bool(re.search(r"\d", clean_text))
+    has_product_marker = any(marker in lower_text for marker in PRODUCT_MARKERS)
+    return len(clean_text) >= 5 and (has_model_number or has_product_marker)
 
 
 def product_name_from_link_text(text: str) -> str:
-    """Remove catalog badges/spec snippets from a product anchor's visible text."""
+    """Очистить название товара от бейджей, цены и характеристик карточки."""
     cleaned = normalize_space(text)
     cleaned = re.sub(r"^(?:0%|хит|new|новинка|спец\. предложение)\s+", "", cleaned, flags=re.I)
     cleaned = re.split(
@@ -227,15 +233,24 @@ def product_name_from_link_text(text: str) -> str:
     return cleaned
 
 
+def dedupe_products(products: Iterable[Motorcycle]) -> list[Motorcycle]:
+    """Убрать дубли, сохранив порядок."""
+    seen: set[str] = set()
+    unique: list[Motorcycle] = []
+    for product in products:
+        key = product.url or product.name
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(product)
+    return unique
+
+
 def catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcycle]:
-    """Find product URLs on the category page and keep the first unique ones."""
-    products = [item for item in jsonld_products(page_html, base_url) if item.url]
+    """Найти первые товарные ссылки на странице каталога."""
+    products = [product for product in jsonld_products(page_html, base_url) if product.url]
     if len(products) >= limit:
         return dedupe_products(products)[:limit]
 
-    # The old implementation required product URLs to start with the exact
-    # category URL.  On motocikl.by product pages can live in a sibling catalog
-    # path, so we accept any product-looking /katalog/ link.
     for href, text in html_links(page_html):
         if not looks_like_product_link(href, text, base_url):
             continue
@@ -249,18 +264,8 @@ def catalog_products(page_html: str, base_url: str, limit: int) -> list[Motorcyc
     return dedupe_products(products)[:limit]
 
 
-def dedupe_products(products: Iterable[Motorcycle]) -> list[Motorcycle]:
-    seen: set[str] = set()
-    unique: list[Motorcycle] = []
-    for product in products:
-        key = product.url or product.name
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(product)
-    return unique
-
-
 def first_match(patterns: Iterable[str], page_html: str) -> str:
+    """Вернуть первое совпадение регулярных выражений."""
     for pattern in patterns:
         match = re.search(pattern, page_html, flags=re.I | re.S)
         if match:
@@ -269,6 +274,7 @@ def first_match(patterns: Iterable[str], page_html: str) -> str:
 
 
 def meta_content(page_html: str, property_name: str) -> str:
+    """Достать content из meta property/name."""
     pattern = (
         rf'<meta[^>]+(?:property|name)=["\']{re.escape(property_name)}["\'][^>]+content=["\'](.*?)["\']'
     )
@@ -276,7 +282,7 @@ def meta_content(page_html: str, property_name: str) -> str:
 
 
 def parse_specs(page_html: str) -> dict[str, dict[str, str]]:
-    """Parse specification tables/lists and group rows by the nearest heading."""
+    """Разобрать таблицы/списки характеристик и сгруппировать их по заголовкам."""
     specs: dict[str, dict[str, str]] = {}
     current_category = "Характеристики"
     cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", page_html)
@@ -307,6 +313,7 @@ def parse_specs(page_html: str) -> dict[str, dict[str, str]]:
 
 
 def parse_detail(product: Motorcycle, page_html: str) -> Motorcycle:
+    """Дополнить товар данными со страницы карточки."""
     product.name = first_match(
         [r"<h1[^>]*>(.*?)</h1>", r"<title[^>]*>(.*?)</title>"], page_html
     ) or product.name
@@ -326,7 +333,7 @@ def parse_detail(product: Motorcycle, page_html: str) -> Motorcycle:
 
 
 def flatten_for_csv(products: list[Motorcycle]) -> tuple[list[str], list[dict[str, str]]]:
-    base_fields = ["Название", "Цена", "Ссылка", "Изображение"]
+    """Преобразовать список товаров в колонки и строки CSV."""
     spec_fields: list[str] = []
 
     for product in products:
@@ -349,10 +356,11 @@ def flatten_for_csv(products: list[Motorcycle]) -> tuple[list[str], list[dict[st
                 row[f"{category}: {key}"] = value
         rows.append(row)
 
-    return base_fields + spec_fields, rows
+    return BASE_FIELDS + spec_fields, rows
 
 
 def save_csv(products: list[Motorcycle], output_path: str) -> None:
+    """Сохранить товары в CSV с кодировкой для Excel."""
     fields, rows = flatten_for_csv(products)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fields, extrasaction="ignore")
@@ -361,6 +369,7 @@ def save_csv(products: list[Motorcycle], output_path: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Прочитать параметры командной строки."""
     parser = argparse.ArgumentParser(
         description="Parse first enduro motorcycles from motocikl.by and export CSV."
     )
@@ -376,6 +385,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Основной сценарий запуска."""
     args = parse_args()
     catalog_html = fetch(args.url)
     if args.debug_html:
@@ -383,7 +393,6 @@ def main() -> int:
             debug_file.write(catalog_html)
 
     products = catalog_products(catalog_html, args.url, args.limit)
-
     if not products:
         print(
             "No product links were found on the catalog page. "

@@ -16,8 +16,7 @@ python3 parse_enduro_motocikl.py
 python3 parse_enduro_motocikl.py \
   --url "https://motocikl.by/katalog/vse_tovary/mototsikly/enduro/" \
   --limit 5 \
-  --output enduro_motocikl.csv \
-  --debug-html catalog.html
+  --output enduro_motocikl.csv
 ```
 
 - `--url` — страница каталога.
@@ -26,34 +25,41 @@ python3 parse_enduro_motocikl.py \
 - `--pause` — пауза между запросами к страницам товаров, чтобы не перегружать сайт.
 - `--debug-html catalog.html` — сохранить скачанную HTML-страницу каталога в файл, если сайт снова изменит верстку и нужно будет понять, почему ссылки не находятся.
 
-## Если снова появится `No product links were found`
+## Если появляется `No product links were found`
 
-Сайт работает на Bitrix и иногда меняет разметку карточек. В этой версии скрипт больше не привязан к точному пути `/enduro/`: он ищет товарные ссылки по всему `/katalog/` и отбрасывает меню, фильтры, цены и служебные ссылки.
-
-Если ошибка повторится, запустите:
+Запустите скрипт так:
 
 ```bash
 python3 parse_enduro_motocikl.py --debug-html catalog.html
 ```
 
-После этого можно отправить файл `catalog.html` разработчику — в нем будет именно та HTML-верстка, которую получил скрипт.
+После этого отправьте файл `catalog.html` разработчику. В этом файле будет именно та HTML-верстка, которую получил скрипт.
 
-## Как решить конфликт в Pull Request
+## Важно про конфликт в Pull Request
 
-Если GitHub показывает конфликт с маркерами `<<<<<<<`, `=======`, `>>>>>>>` в `parse_enduro_motocikl.py`, оставьте вариант из ветки `codex/parse-first-5-enduro-motorcycles-data-zezdic`, а старый вариант из `main` удалите. В рабочем файле не должно остаться строк с этими маркерами.
+Если в GitHub или в редакторе видны строки `<<<<<<<`, `=======`, `>>>>>>>`, значит это не Python-код, а незавершенный merge conflict. Такой файл запускаться не будет.
 
-Коротко, в конфликте нужно выбрать:
+В файле `parse_enduro_motocikl.py` должна быть только одна копия скрипта:
 
-- стековый `LinkParser`, который собирает текст из всей карточки товара;
-- функции `html_links`, `looks_like_product_link`, `product_name_from_link_text`;
-- новую версию `catalog_products`, которая ищет товарные ссылки по `/katalog/`, а не только строго внутри `/enduro/`;
-- параметр `--debug-html` и сохранение HTML в `main()`.
+- файл начинается с `#!/usr/bin/env python3`;
+- файл заканчивается строками:
 
-После ручного удаления маркеров проверьте файл командой:
+```python
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- после этих строк не должно быть второй копии скрипта;
+- в файле не должно быть строк `<<<<<<<`, `=======`, `>>>>>>>`.
+
+Проверить это можно командами:
 
 ```bash
 python3 -m py_compile parse_enduro_motocikl.py
+rg '^(<<<<<<<|=======|>>>>>>>)|^#!/usr/bin/env python3' parse_enduro_motocikl.py
 ```
+
+Команда `rg` должна показать только одну строку с `#!/usr/bin/env python3` и ни одной строки с `<<<<<<<`, `=======`, `>>>>>>>`.
 
 ## Как данные разбиваются по категориям
 
